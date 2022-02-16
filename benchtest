@@ -1,0 +1,74 @@
+#!/bin/bash
+
+# Check that argument is a correct device number
+if [ $# -eq 0 ]; then
+	echo "Enter device number (1-13)"
+	exit 1
+fi
+
+# Check if issued as root, rerun the script otherwise
+if [ $USER != "root" ]; then
+  sudo -u root $0 "$@"
+  exit 0
+fi
+
+devnum=$1
+pass="<password for ecrypted devices>"
+device="/dev/sda$devnum"
+printf "Mounting device $device... "
+
+# If device > 1 then open LUKS device, else assume
+# that the device is not using LUKS and just mount it
+if [ $devnum -gt 1 ]; then
+  cryptsetup luksOpen $device encdev << EOD
+$pass
+EOD
+  if [ $? != 0 ]; then
+    exit 1
+  fi
+  mount /dev/mapper/encdev /mnt
+  if [ $? != 0 ]; then
+    exit 1
+  fi
+else
+  mount /dev/sda$1 /mnt
+  if [ $? != 0 ]; then
+    exit 1
+  fi
+fi
+
+echo "ok"
+# Set an array with size counts for dd (128k * count)
+declare -a bsc=(64 128 512 1K 4K 8K 32K)
+bscLen=${#bsc[@]}
+
+echo "Testing read/write speeds..."
+# Perform the benchmarking tests for the device 10 times
+# Each pass will create 7 different files with different sizes
+# After file is created with dd, test the read speed from the same file
+for pass in {1..10}; do
+  printf "Pass $pass... "
+    for i in "${bsc[@]}"; do
+      wspeed=$(dd if=/dev/zero of=/mnt/temp oflag=direct bs=128k count=$i 2>&1 >/dev/null | tail -n1 | awk '{print $10}' | tr ',' '.')
+      wtotal=$(awk 'BEGIN {print '$wtotal+$wspeed'}')
+      # Drop read caches to get accurate read result
+      sysctl -w vm.drop_caches=3 &>/dev/null
+      rspeed=$(dd if=/mnt/temp of=/dev/null bs=1M 2>&1 >/dev/null | tail -n1 | awk '{print $10}' | tr ',' '.')
+      rtotal=$(awk 'BEGIN {print '$rtotal+$rspeed'}')
+    done
+    waverage=$(awk 'BEGIN {print '$wtotal/$bscLen'}')
+    raverage=$(awk 'BEGIN {print '$rtotal/$bscLen'}')
+    echo "done. Read: $raverage MB/sek, Write: $waverage MB/sek"
+    wtotal=0
+    rtotal=0
+done
+
+# Clean up everything
+printf "Cleaning up and closing devices... "
+rm -r /mnt/*
+umount /mnt
+sleep 1
+if [ $devnum -gt 1 ]; then
+  cryptsetup close encdev
+fi
+echo "ok"
